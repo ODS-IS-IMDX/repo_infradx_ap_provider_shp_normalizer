@@ -1,0 +1,11 @@
+{
+  "min_distance": 0.01,
+  "source_epsg": "6669",
+  "target_epsg": "6677",
+  "source_encoding": "UTF-8",
+  "column_mappings": {
+    "デフォルト": {}
+  },
+  "file_mapping": {},
+  "current_mapping_name": "デフォルト"
+}
