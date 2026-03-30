@@ -30,9 +30,8 @@ Shapefile正規化ツール - GUIアプリケーション
 """
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext, simpledialog
+from tkinter import ttk, filedialog, messagebox, scrolledtext
 import os
-import sys
 import json
 import numpy as np
 import pandas as pd
@@ -42,6 +41,7 @@ import tempfile
 import shutil
 import threading
 import time
+import fnmatch
 
 # 同梱されたライブラリのパス追加（EXE配布用）
 # PyInstallerでビルドする際、libsフォルダを一緒にパッケージングすることで
@@ -53,7 +53,7 @@ if os.path.exists(libs_path):
 # GIS関連ライブラリのインポートとエラーハンドリング
 try:
     import geopandas as gpd
-    from shapely.geometry import Point, LineString, Polygon, MultiPoint, MultiLineString, MultiPolygon
+    from shapely.geometry import Point, LineString, Polygon, MultiLineString, MultiPolygon
     from shapely import validation
     from shapely.validation import make_valid
     
@@ -254,7 +254,7 @@ class ShapefileNormalizerApp:
         self.last_selected_facility_type = "線設備"            # 最後に選択した設備タイプを記憶
         
         # UIで使用するデフォルト値
-        self.min_distance = tk.DoubleVar(value=0.01)           # 短い辺のチェック閾値（m）
+        self.min_distance = tk.DoubleVar(value=0)              # 短い辺のチェック閾値（m）
         self.source_epsg = tk.StringVar(value="6669")          # 入力座標系（デフォルト: JGD2000系9）
         self.target_epsg = tk.StringVar(value="6677")          # 出力座標系（デフォルト: JGD2011系9）
         self.source_encoding = tk.StringVar(value="UTF-8")     # 入力文字コード
@@ -590,10 +590,9 @@ class ShapefileNormalizerApp:
         
         # Combobox上でのマウスホイール処理
         def _on_combobox_mousewheel(event):
-            """Combobox上でもCanvas全体をスクロールし、Comboboxのドロップダウンへの伝播を防ぐ"""
-            # スクロール可能な範囲があるかチェック（コンテンツがCanvas高さより大きい場合のみスクロール）
-            if self.column_canvas.winfo_height() < self.column_scrollable_frame.winfo_reqheight():
-                self.column_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            """Comboboxのドロップダウンが開いているときに背後がスクロールしないようにイベントを止める"""
+            # Combobox上では何もせず、イベントの伝播のみを止める
+            # （ドロップダウン内のスクロールはTkinterが自動処理する）
             return "break"
 
         self._on_combobox_mousewheel = _on_combobox_mousewheel
@@ -676,24 +675,24 @@ class ShapefileNormalizerApp:
 
             # 補完設定（同じ行）
             ttk.Label(assign_frame, text="補完:").pack(side=tk.LEFT, padx=(28, 5))
-            assign_fallback_type_var = tk.StringVar()
+            assign_fallback_type_var = tk.StringVar(value="－")
             assign_fallback_type = ttk.Combobox(assign_frame, textvariable=assign_fallback_type_var,
-                                               values=["固定値", "他カラム", "ファイル名"],
-                                               width=8, state="readonly")
+                                               values=["－", "固定値", "カラム条件分岐", "ファイル名分岐"],
+                                               width=12, state="readonly")
             assign_fallback_type.pack(side=tk.LEFT, padx=5)
             assign_fallback_type.bind("<MouseWheel>", self._on_combobox_mousewheel)
             
             # 補完値入力用ウィジェット（ヘルパー関数で作成）
-            fallback_widgets = self.create_fallback_widgets(assign_frame, entry_width=15, mapping_name="カラム代入")
-            
+            fallback_widgets = self.create_fallback_widgets(assign_frame, entry_width=17, mapping_name="カラム代入")
+
             # 保存/ロード処理用にエイリアスを展開
-            assign_fallback_container = fallback_widgets['container']
-            assign_fallback_entry = fallback_widgets['entry']
-            assign_fallback_combo = fallback_widgets['combo']
             assign_fallback_fixed = fallback_widgets['fixed']
             assign_fallback_column = fallback_widgets['column']
+            assign_fallback_column_mapping = fallback_widgets['column_mapping']
+            assign_fallback_column_default = fallback_widgets['column_default']
             assign_fallback_filename = fallback_widgets['filename']
-            
+            assign_fallback_filename_default = fallback_widgets['filename_default']
+
             # イベントハンドラをバインド
             on_assign_fallback_type_change = self.create_fallback_type_change_handler(
                 fallback_widgets, mapping_name="カラム代入"
@@ -718,15 +717,15 @@ class ShapefileNormalizerApp:
 
             # 補完設定（同じ行）
             ttk.Label(calc_frame, text="補完:").pack(side=tk.LEFT, padx=(32, 5))
-            calc_fallback_type_var = tk.StringVar()
+            calc_fallback_type_var = tk.StringVar(value="－")
             calc_fallback_type = ttk.Combobox(calc_frame, textvariable=calc_fallback_type_var,
-                                             values=["固定値", "他カラム", "ファイル名"],
-                                             width=8, state="readonly")
+                                             values=["－", "固定値", "カラム条件分岐", "ファイル名分岐"],
+                                             width=12, state="readonly")
             calc_fallback_type.pack(side=tk.LEFT, padx=5)
             calc_fallback_type.bind("<MouseWheel>", self._on_combobox_mousewheel)
             
             # 補完値入力用ウィジェット（ヘルパー関数で作成）
-            fallback_widgets = self.create_fallback_widgets(calc_frame, entry_width=15, mapping_name="カラム四則演算")
+            fallback_widgets = self.create_fallback_widgets(calc_frame, entry_width=17, mapping_name="カラム四則演算")
             
             # 保存/ロード処理用にエイリアスを展開
             calc_fallback_container = fallback_widgets['container']
@@ -734,8 +733,11 @@ class ShapefileNormalizerApp:
             calc_fallback_combo = fallback_widgets['combo']
             calc_fallback_fixed = fallback_widgets['fixed']
             calc_fallback_column = fallback_widgets['column']
+            calc_fallback_column_mapping = fallback_widgets['column_mapping']
+            calc_fallback_column_default = fallback_widgets['column_default']
             calc_fallback_filename = fallback_widgets['filename']
-            
+            calc_fallback_filename_default = fallback_widgets['filename_default']
+
             # イベントハンドラをバインド
             on_calc_fallback_type_change = self.create_fallback_type_change_handler(
                 fallback_widgets, mapping_name="カラム四則演算"
@@ -760,15 +762,15 @@ class ShapefileNormalizerApp:
 
             # 補完設定（同じ行）
             ttk.Label(multi_calc_frame, text="補完:").pack(side=tk.LEFT, padx=(27, 5))
-            multi_calc_fallback_type_var = tk.StringVar()
+            multi_calc_fallback_type_var = tk.StringVar(value="－")
             multi_calc_fallback_type = ttk.Combobox(multi_calc_frame, textvariable=multi_calc_fallback_type_var,
-                                                   values=["固定値", "他カラム", "ファイル名"],
-                                                   width=8, state="readonly")
+                                                   values=["－", "固定値", "カラム条件分岐", "ファイル名分岐"],
+                                                   width=12, state="readonly")
             multi_calc_fallback_type.pack(side=tk.LEFT, padx=5)
             multi_calc_fallback_type.bind("<MouseWheel>", self._on_combobox_mousewheel)
             
             # 補完値入力用ウィジェット（ヘルパー関数で作成）
-            fallback_widgets = self.create_fallback_widgets(multi_calc_frame, entry_width=15, mapping_name="複数カラム四則演算")
+            fallback_widgets = self.create_fallback_widgets(multi_calc_frame, entry_width=17, mapping_name="複数カラム四則演算")
             
             # 保存/ロード処理用にエイリアスを展開
             multi_calc_fallback_container = fallback_widgets['container']
@@ -776,8 +778,11 @@ class ShapefileNormalizerApp:
             multi_calc_fallback_combo = fallback_widgets['combo']
             multi_calc_fallback_fixed = fallback_widgets['fixed']
             multi_calc_fallback_column = fallback_widgets['column']
+            multi_calc_fallback_column_mapping = fallback_widgets['column_mapping']
+            multi_calc_fallback_column_default = fallback_widgets['column_default']
             multi_calc_fallback_filename = fallback_widgets['filename']
-            
+            multi_calc_fallback_filename_default = fallback_widgets['filename_default']
+
             # イベントハンドラをバインド
             on_multi_calc_fallback_type_change = self.create_fallback_type_change_handler(
                 fallback_widgets, mapping_name="複数カラム四則演算"
@@ -820,15 +825,15 @@ class ShapefileNormalizerApp:
 
             # 補完設定（同じ行）- ラベル2つ分を考慮
             ttk.Label(multi_extract_frame, text="補完:").pack(side=tk.LEFT, padx=(15, 5))
-            extract_fallback_type_var = tk.StringVar()
+            extract_fallback_type_var = tk.StringVar(value="－")
             extract_fallback_type = ttk.Combobox(multi_extract_frame, textvariable=extract_fallback_type_var,
-                                                values=["固定値", "他カラム", "ファイル名"],
-                                                width=8, state="readonly")
+                                                values=["－", "固定値", "カラム条件分岐", "ファイル名分岐"],
+                                                width=12, state="readonly")
             extract_fallback_type.pack(side=tk.LEFT, padx=5)
             extract_fallback_type.bind("<MouseWheel>", self._on_combobox_mousewheel)
             
             # 補完値入力用ウィジェット（ヘルパー関数で作成）
-            fallback_widgets = self.create_fallback_widgets(multi_extract_frame, entry_width=15, mapping_name="複数カラム抽出")
+            fallback_widgets = self.create_fallback_widgets(multi_extract_frame, entry_width=17, mapping_name="複数カラム抽出")
             
             # 保存/ロード処理用にエイリアスを展開
             extract_fallback_container = fallback_widgets['container']
@@ -836,8 +841,11 @@ class ShapefileNormalizerApp:
             extract_fallback_combo = fallback_widgets['combo']
             extract_fallback_fixed = fallback_widgets['fixed']
             extract_fallback_column = fallback_widgets['column']
+            extract_fallback_column_mapping = fallback_widgets['column_mapping']
+            extract_fallback_column_default = fallback_widgets['column_default']
             extract_fallback_filename = fallback_widgets['filename']
-            
+            extract_fallback_filename_default = fallback_widgets['filename_default']
+
             # イベントハンドラをバインド
             on_extract_fallback_type_change = self.create_fallback_type_change_handler(
                 fallback_widgets, mapping_name="複数カラム抽出"
@@ -930,9 +938,11 @@ class ShapefileNormalizerApp:
                              a_frame=assign_frame, c_frame=calc_frame, mc_frame=multi_calc_frame,
                              me_frame=multi_extract_frame,
                              f_frame=fixed_frame, fn_frame=filename_frame, r_frame=random_frame, s_frame=seq_frame,
-                             cond_frame=condition_frame, fnb_frame=filename_branch_frame):
+                             cond_frame=condition_frame, fnb_frame=filename_branch_frame,
+                             a_fallback=assign_fallback_type, c_fallback=calc_fallback_type,
+                             mc_fallback=multi_calc_fallback_type, me_fallback=extract_fallback_type):
                 selected_type = t_var.get()
-                
+
                 # 全て非表示
                 a_frame.grid_remove()
                 c_frame.grid_remove()
@@ -949,15 +959,27 @@ class ShapefileNormalizerApp:
                 if selected_type == "カラム代入":
                     a_frame.grid()
                     a_frame.update_idletasks()
+                    # 補完機能を「－」に設定
+                    if a_fallback.get() == "":
+                        a_fallback.set("－")
                 elif selected_type == "カラム四則演算":
                     c_frame.grid()
                     c_frame.update_idletasks()
+                    # 補完機能を「－」に設定
+                    if c_fallback.get() == "":
+                        c_fallback.set("－")
                 elif t_var.get() == "複数カラム四則演算":
                     mc_frame.grid()
                     mc_frame.update_idletasks()
+                    # 補完機能を「－」に設定
+                    if mc_fallback.get() == "":
+                        mc_fallback.set("－")
                 elif t_var.get() == "複数カラム抽出":
                     me_frame.grid()
                     me_frame.update_idletasks()
+                    # 補完機能を「－」に設定
+                    if me_fallback.get() == "":
+                        me_fallback.set("－")
                 elif t_var.get() == "固定値":
                     f_frame.grid()
                 elif t_var.get() == "ランダム値":
@@ -981,27 +1003,39 @@ class ShapefileNormalizerApp:
                 'assign_fallback_type': assign_fallback_type,
                 'assign_fallback_fixed': assign_fallback_fixed,
                 'assign_fallback_column': assign_fallback_column,
+                'assign_fallback_column_mapping': assign_fallback_column_mapping,
+                'assign_fallback_column_default': assign_fallback_column_default,
                 'assign_fallback_filename': assign_fallback_filename,
+                'assign_fallback_filename_default': assign_fallback_filename_default,
                 'calc_col_combo': calc_col_combo,
                 'calc_op_combo': calc_op_combo,
                 'calc_num_entry': calc_num_entry,
                 'calc_fallback_type': calc_fallback_type,
                 'calc_fallback_fixed': calc_fallback_fixed,
                 'calc_fallback_column': calc_fallback_column,
+                'calc_fallback_column_mapping': calc_fallback_column_mapping,
+                'calc_fallback_column_default': calc_fallback_column_default,
                 'calc_fallback_filename': calc_fallback_filename,
+                'calc_fallback_filename_default': calc_fallback_filename_default,
                 'multi_col1_combo': multi_col1_combo,
                 'multi_op_combo': multi_op_combo,
                 'multi_col2_combo': multi_col2_combo,
                 'multi_calc_fallback_type': multi_calc_fallback_type,
                 'multi_calc_fallback_fixed': multi_calc_fallback_fixed,
                 'multi_calc_fallback_column': multi_calc_fallback_column,
+                'multi_calc_fallback_column_mapping': multi_calc_fallback_column_mapping,
+                'multi_calc_fallback_column_default': multi_calc_fallback_column_default,
                 'multi_calc_fallback_filename': multi_calc_fallback_filename,
+                'multi_calc_fallback_filename_default': multi_calc_fallback_filename_default,
                 'extract_mode_combo': extract_mode_combo,
                 'extract_columns_entry': extract_columns_entry,
                 'extract_fallback_type': extract_fallback_type,
                 'extract_fallback_fixed': extract_fallback_fixed,
                 'extract_fallback_column': extract_fallback_column,
+                'extract_fallback_column_mapping': extract_fallback_column_mapping,
+                'extract_fallback_column_default': extract_fallback_column_default,
                 'extract_fallback_filename': extract_fallback_filename,
+                'extract_fallback_filename_default': extract_fallback_filename_default,
                 'fixed_entry': fixed_entry,
                 'filename_frame': filename_frame,
                 'random_min_entry': random_min_entry,
@@ -1065,9 +1099,9 @@ class ShapefileNormalizerApp:
                 {
                     'container': コンテナフレーム,
                     'entry': Entry（手入力用）,
-                    'combo': Combobox（他カラム用、readonly）,
+                    'combo': Combobox（カラム条件分岐用、readonly）,
                     'fixed': 固定値用ウィジェット（Entryのエイリアス）,
-                    'column': 他カラム用ウィジェット（Comboboxのエイリアス）,
+                    'column': カラム条件分岐用ウィジェット（Comboboxのエイリアス）,
                     'filename': ファイル名用ウィジェット（Entryのエイリアス）
                 }
         """
@@ -1077,23 +1111,71 @@ class ShapefileNormalizerApp:
         
         # 手入力用Entry（固定値・ファイル名用）
         entry = ttk.Entry(container, width=entry_width)
-        entry.grid(row=0, column=0, sticky="w")
-        
-        # ドロップダウン選択用Combobox（他カラム用 - readonly）
+        # 初期状態ではgridしない（後で必要に応じて表示）
+
+        # ドロップダウン選択用Combobox（カラム条件分岐用 - readonly）
         combo = ttk.Combobox(container, width=entry_width, state="readonly")
         combo.bind("<MouseWheel>", self._on_combobox_mousewheel)
         # 初期状態ではgridしない（後で必要に応じて表示）
-        
+
+        # カラム条件分岐用Entry（入力値=出力値,...形式）
+        column_mapping_entry = ttk.Entry(container, width=entry_width)
+        # 初期状態ではgridしない
+
+        # カラム条件分岐デフォルト値用Entry
+        column_default_entry = ttk.Entry(container, width=entry_width)
+        # 初期状態ではgridしない
+
+        # ファイル名分岐デフォルト値用Entry
+        filename_default_entry = ttk.Entry(container, width=entry_width)
+        # 初期状態ではgridしない
+
         # 保存/ロード処理用のエイリアス（各補完タイプで使用するウィジェットを指定）
         return {
             'container': container,
             'entry': entry,
             'combo': combo,
+            'column_mapping_entry': column_mapping_entry,
+            'column_default_entry': column_default_entry,
+            'filename_default_entry': filename_default_entry,
             'fixed': entry,      # 固定値用
-            'column': combo,     # 他カラム用
-            'filename': entry    # ファイル名用
+            'column': combo,     # カラム条件分岐用（カラム選択）
+            'column_mapping': column_mapping_entry,  # カラム条件分岐用（条件設定）
+            'column_default': column_default_entry,   # カラム条件分岐用（デフォルト値）
+            'filename': entry,   # ファイル名用（マッピング）
+            'filename_default': filename_default_entry  # ファイル名用（デフォルト値）
         }
-    
+
+    def create_placeholder_handlers(self, entry, placeholder_text):
+        """プレースホルダー用のイベントハンドラを生成
+
+        Args:
+            entry: 入力欄ウィジェット
+            placeholder_text: プレースホルダーテキスト
+
+        Returns:
+            tuple: (on_focus_in, on_focus_out) イベントハンドラのタプル
+        """
+        def on_focus_in(e, widget=entry):
+            # フォーカスが入ったときにプレースホルダを消す
+            if hasattr(widget, '_showing_placeholder') and widget._showing_placeholder:
+                widget.delete(0, tk.END)
+                widget.config(foreground='black')
+                widget._showing_placeholder = False
+
+        def on_focus_out(e, widget=entry, ph=placeholder_text):
+            # フォーカスが外れたときに空欄ならプレースホルダを表示
+            if widget.get().strip() == '':
+                widget.delete(0, tk.END)
+                widget.insert(0, ph)
+                widget.config(foreground='gray')
+                widget._showing_placeholder = True
+            else:
+                widget.config(foreground='black')
+                widget._showing_placeholder = False
+
+        return on_focus_in, on_focus_out
+
     def create_fallback_type_change_handler(self, widgets, mapping_name=""):
         """補完タイプ変更時のイベントハンドラを生成
         
@@ -1106,34 +1188,204 @@ class ShapefileNormalizerApp:
         """
         entry = widgets['entry']
         combo = widgets['combo']
-        
+        column_mapping_entry = widgets['column_mapping_entry']
+        column_default_entry = widgets['column_default_entry']
+        filename_default_entry = widgets['filename_default_entry']
+
         def handler(event):
             try:
                 selected_type = event.widget.get()
-                
+
                 # 選択されたタイプに応じてウィジェットを切り替え（gridで同じ位置を使用）
-                if selected_type == "固定値":
-                    # Comboboxを非表示、Entryを表示
+                if selected_type == "－":
+                    # すべてのウィジェットを非表示
+                    entry.grid_forget()
                     combo.grid_forget()
+                    column_mapping_entry.grid_forget()
+                    column_default_entry.grid_forget()
+                    filename_default_entry.grid_forget()
+
+                elif selected_type == "固定値":
+                    # Comboboxとカラム条件分岐用Entryを非表示、固定値用Entryを表示
+                    combo.grid_forget()
+                    column_mapping_entry.grid_forget()
+                    column_default_entry.grid_forget()
+                    filename_default_entry.grid_forget()
                     entry.delete(0, tk.END)
+                    entry.config(foreground='black')
+                    # プレースホルダイベントをクリア
+                    entry.unbind('<FocusIn>')
+                    entry.unbind('<FocusOut>')
+                    entry.unbind('<KeyRelease>')
+                    entry.unbind('<Button-1>')
+                    entry._showing_placeholder = False
                     entry.grid(row=0, column=0, sticky="w")
                     entry.focus()
-                    
-                elif selected_type == "他カラム":
-                    # Entryを非表示、Comboboxを表示
+
+                elif selected_type == "カラム条件分岐":
+                    # 固定値用Entryを非表示、Comboboxとカラム条件分岐用Entryを表示
                     entry.grid_forget()
+                    filename_default_entry.grid_forget()
                     cols = self.input_columns if self.input_columns else []
                     combo['values'] = cols
                     combo.set('')
                     combo.grid(row=0, column=0, sticky="w")
+
+                    # 条件設定用Entry（プレースホルダ付き）
+                    column_mapping_entry.delete(0, tk.END)
+                    mapping_placeholder = "入力値=出力値,..."
+                    if not hasattr(column_mapping_entry, '_placeholder'):
+                        column_mapping_entry._placeholder = mapping_placeholder
+                    else:
+                        column_mapping_entry._placeholder = mapping_placeholder
+                    column_mapping_entry._showing_placeholder = False
+
+                    def on_click_column_mapping(e):
+                        if hasattr(column_mapping_entry, '_showing_placeholder') and column_mapping_entry._showing_placeholder:
+                            column_mapping_entry.delete(0, tk.END)
+                            column_mapping_entry.config(foreground='black')
+                            column_mapping_entry._showing_placeholder = False
+
+                    def on_focus_out_column_mapping(e):
+                        if column_mapping_entry.get().strip() == '':
+                            column_mapping_entry.delete(0, tk.END)
+                            column_mapping_entry.insert(0, column_mapping_entry._placeholder)
+                            column_mapping_entry.config(foreground='gray')
+                            column_mapping_entry._showing_placeholder = True
+                        else:
+                            column_mapping_entry.config(foreground='black')
+                            column_mapping_entry._showing_placeholder = False
+
+                    column_mapping_entry.unbind('<FocusIn>')
+                    column_mapping_entry.unbind('<FocusOut>')
+                    column_mapping_entry.unbind('<KeyRelease>')
+                    column_mapping_entry.unbind('<Button-1>')
+                    column_mapping_entry.bind('<Button-1>', on_click_column_mapping)
+                    column_mapping_entry.bind('<FocusOut>', on_focus_out_column_mapping)
+
+                    column_mapping_entry.insert(0, mapping_placeholder)
+                    column_mapping_entry.config(foreground='gray')
+                    column_mapping_entry._showing_placeholder = True
+                    column_mapping_entry.grid(row=0, column=1, sticky="w", padx=(5, 0))
+
+                    # デフォルト値用Entry（プレースホルダ付き）
+                    column_default_entry.delete(0, tk.END)
+                    default_placeholder = "デフォルト"
+                    if not hasattr(column_default_entry, '_placeholder'):
+                        column_default_entry._placeholder = default_placeholder
+                    else:
+                        column_default_entry._placeholder = default_placeholder
+                    column_default_entry._showing_placeholder = False
+
+                    def on_click_column_default(e):
+                        if hasattr(column_default_entry, '_showing_placeholder') and column_default_entry._showing_placeholder:
+                            column_default_entry.delete(0, tk.END)
+                            column_default_entry.config(foreground='black')
+                            column_default_entry._showing_placeholder = False
+
+                    def on_focus_out_column_default(e):
+                        if column_default_entry.get().strip() == '':
+                            column_default_entry.delete(0, tk.END)
+                            column_default_entry.insert(0, column_default_entry._placeholder)
+                            column_default_entry.config(foreground='gray')
+                            column_default_entry._showing_placeholder = True
+                        else:
+                            column_default_entry.config(foreground='black')
+                            column_default_entry._showing_placeholder = False
+
+                    column_default_entry.unbind('<FocusIn>')
+                    column_default_entry.unbind('<FocusOut>')
+                    column_default_entry.unbind('<KeyRelease>')
+                    column_default_entry.unbind('<Button-1>')
+                    column_default_entry.bind('<Button-1>', on_click_column_default)
+                    column_default_entry.bind('<FocusOut>', on_focus_out_column_default)
+
+                    column_default_entry.insert(0, default_placeholder)
+                    column_default_entry.config(foreground='gray')
+                    column_default_entry._showing_placeholder = True
+                    column_default_entry.grid(row=0, column=2, sticky="w", padx=(5, 0))
+
                     combo.focus()
                     
-                elif selected_type == "ファイル名":
-                    # Comboboxを非表示、Entryを表示
+                elif selected_type == "ファイル名分岐":
+                    # Comboboxとカラム条件分岐用Entryを非表示、Entryを表示
                     combo.grid_forget()
+                    column_mapping_entry.grid_forget()
+                    column_default_entry.grid_forget()
+
+                    # ファイル名マッピング用Entry（プレースホルダ付き）
                     entry.delete(0, tk.END)
+                    mapping_placeholder = "ファイル名=出力値,..."
+                    if not hasattr(entry, '_placeholder'):
+                        entry._placeholder = mapping_placeholder
+                    else:
+                        entry._placeholder = mapping_placeholder
+                    entry._showing_placeholder = False
+
+                    def on_focus_in_mapping(e):
+                        if hasattr(entry, '_showing_placeholder') and entry._showing_placeholder:
+                            entry.delete(0, tk.END)
+                            entry.config(foreground='black')
+                            entry._showing_placeholder = False
+
+                    def on_focus_out_mapping(e):
+                        if entry.get().strip() == '':
+                            entry.delete(0, tk.END)
+                            entry.insert(0, entry._placeholder)
+                            entry.config(foreground='gray')
+                            entry._showing_placeholder = True
+                        else:
+                            entry.config(foreground='black')
+                            entry._showing_placeholder = False
+
+                    entry.unbind('<FocusIn>')
+                    entry.unbind('<FocusOut>')
+                    entry.unbind('<KeyRelease>')
+                    entry.unbind('<Button-1>')
+                    entry.bind('<FocusIn>', on_focus_in_mapping)
+                    entry.bind('<FocusOut>', on_focus_out_mapping)
+
+                    entry.insert(0, mapping_placeholder)
+                    entry.config(foreground='gray')
+                    entry._showing_placeholder = True
                     entry.grid(row=0, column=0, sticky="w")
-                    entry.focus()
+
+                    # デフォルト値用Entry（プレースホルダ付き）
+                    filename_default_entry.delete(0, tk.END)
+                    default_placeholder = "デフォルト"
+                    if not hasattr(filename_default_entry, '_placeholder'):
+                        filename_default_entry._placeholder = default_placeholder
+                    else:
+                        filename_default_entry._placeholder = default_placeholder
+                    filename_default_entry._showing_placeholder = False
+
+                    def on_focus_in_default(e):
+                        if hasattr(filename_default_entry, '_showing_placeholder') and filename_default_entry._showing_placeholder:
+                            filename_default_entry.delete(0, tk.END)
+                            filename_default_entry.config(foreground='black')
+                            filename_default_entry._showing_placeholder = False
+
+                    def on_focus_out_default(e):
+                        if filename_default_entry.get().strip() == '':
+                            filename_default_entry.delete(0, tk.END)
+                            filename_default_entry.insert(0, filename_default_entry._placeholder)
+                            filename_default_entry.config(foreground='gray')
+                            filename_default_entry._showing_placeholder = True
+                        else:
+                            filename_default_entry.config(foreground='black')
+                            filename_default_entry._showing_placeholder = False
+
+                    filename_default_entry.unbind('<FocusIn>')
+                    filename_default_entry.unbind('<FocusOut>')
+                    filename_default_entry.unbind('<KeyRelease>')
+                    filename_default_entry.unbind('<Button-1>')
+                    filename_default_entry.bind('<FocusIn>', on_focus_in_default)
+                    filename_default_entry.bind('<FocusOut>', on_focus_out_default)
+
+                    filename_default_entry.insert(0, default_placeholder)
+                    filename_default_entry.config(foreground='gray')
+                    filename_default_entry._showing_placeholder = True
+                    filename_default_entry.grid(row=0, column=1, sticky="w", padx=(5, 0))
                 
             except Exception as e:
                 self.log(f"補完設定の変更中にエラーが発生しました: {e}", "ERROR")
@@ -1399,41 +1651,166 @@ class ShapefileNormalizerApp:
                 mapping_data[out_col]['column'] = widgets['assign_combo'].get()
                 # 補完処理を保存（fallback_typeに値があれば有効）
                 fallback_type = widgets['assign_fallback_type'].get()
-                if fallback_type:
-                    mapping_data[out_col]['fallback'] = {
-                        'type': fallback_type,
-                        'fixed_value': widgets['assign_fallback_fixed'].get(),
-                        'column': widgets['assign_fallback_column'].get(),
-                        'filename_mapping': widgets['assign_fallback_filename'].get()
-                    }
+                if fallback_type and fallback_type != "－":
+                    fallback_data = {'type': fallback_type}
+                    if fallback_type == "固定値":
+                        fallback_data['value'] = widgets['assign_fallback_fixed'].get()
+                    elif fallback_type == "カラム条件分岐":
+                        fallback_data['column'] = widgets['assign_fallback_column'].get()
+                        # 条件文字列を解析して保存
+                        column_mapping_entry = widgets['assign_fallback_column_mapping']
+                        # プレースホルダが表示されている場合は空文字列として扱う
+                        if hasattr(column_mapping_entry, '_showing_placeholder') and column_mapping_entry._showing_placeholder:
+                            column_mapping_value = ""
+                        else:
+                            column_mapping_value = column_mapping_entry.get()
+                        conditions = []
+                        if column_mapping_value:
+                            # カンマで分割して各条件を解析
+                            for item in column_mapping_value.split(','):
+                                item = item.strip()
+                                if '=' in item:
+                                    parts = item.split('=', 1)
+                                    input_val = parts[0].strip()
+                                    output_val = parts[1].strip()
+                                    if input_val:  # 入力値が空でない場合のみ保存
+                                        conditions.append({'input': input_val, 'output': output_val})
+                        fallback_data['conditions'] = conditions
+                        # デフォルト値を保存
+                        column_default_entry = widgets['assign_fallback_column_default']
+                        # プレースホルダが表示されている場合は空文字列として扱う
+                        if hasattr(column_default_entry, '_showing_placeholder') and column_default_entry._showing_placeholder:
+                            column_default_value = ""
+                        else:
+                            column_default_value = column_default_entry.get()
+                        fallback_data['default'] = column_default_value
+                    elif fallback_type == "ファイル名分岐":
+                        filename_mapping_entry = widgets['assign_fallback_filename']
+                        # プレースホルダが表示されている場合は空文字列として扱う
+                        if hasattr(filename_mapping_entry, '_showing_placeholder') and filename_mapping_entry._showing_placeholder:
+                            filename_mapping_value = ""
+                        else:
+                            filename_mapping_value = filename_mapping_entry.get()
+                        fallback_data['filename_mapping'] = filename_mapping_value
+                        # デフォルト値を保存
+                        filename_default_entry = widgets['assign_fallback_filename_default']
+                        if hasattr(filename_default_entry, '_showing_placeholder') and filename_default_entry._showing_placeholder:
+                            filename_default_value = ""
+                        else:
+                            filename_default_value = filename_default_entry.get()
+                        fallback_data['default'] = filename_default_value
+                    mapping_data[out_col]['fallback'] = fallback_data
             elif mapping_type == "カラム四則演算":
                 mapping_data[out_col]['column'] = widgets['calc_col_combo'].get()
                 mapping_data[out_col]['operator'] = widgets['calc_op_combo'].get()
                 mapping_data[out_col]['value'] = widgets['calc_num_entry'].get()
                 # 補完処理を保存（fallback_typeに値があれば有効）
                 fallback_type = widgets['calc_fallback_type'].get()
-                if fallback_type:
-                    mapping_data[out_col]['fallback'] = {
-                        'type': fallback_type,
-                        'fixed_value': widgets['calc_fallback_fixed'].get(),
-                        'column': widgets['calc_fallback_column'].get(),
-                        'filename_mapping': widgets['calc_fallback_filename'].get()
-                    }
+                if fallback_type and fallback_type != "－":
+                    fallback_data = {'type': fallback_type}
+                    if fallback_type == "固定値":
+                        fallback_data['value'] = widgets['calc_fallback_fixed'].get()
+                    elif fallback_type == "カラム条件分岐":
+                        fallback_data['column'] = widgets['calc_fallback_column'].get()
+                        # 条件文字列を解析して保存
+                        column_mapping_entry = widgets['calc_fallback_column_mapping']
+                        # プレースホルダが表示されている場合は空文字列として扱う
+                        if hasattr(column_mapping_entry, '_showing_placeholder') and column_mapping_entry._showing_placeholder:
+                            column_mapping_value = ""
+                        else:
+                            column_mapping_value = column_mapping_entry.get()
+                        conditions = []
+                        if column_mapping_value:
+                            # カンマで分割して各条件を解析
+                            for item in column_mapping_value.split(','):
+                                item = item.strip()
+                                if '=' in item:
+                                    parts = item.split('=', 1)
+                                    input_val = parts[0].strip()
+                                    output_val = parts[1].strip()
+                                    if input_val:  # 入力値が空でない場合のみ保存
+                                        conditions.append({'input': input_val, 'output': output_val})
+                        fallback_data['conditions'] = conditions
+                        # デフォルト値を保存
+                        column_default_entry = widgets['calc_fallback_column_default']
+                        # プレースホルダが表示されている場合は空文字列として扱う
+                        if hasattr(column_default_entry, '_showing_placeholder') and column_default_entry._showing_placeholder:
+                            column_default_value = ""
+                        else:
+                            column_default_value = column_default_entry.get()
+                        fallback_data['default'] = column_default_value
+                    elif fallback_type == "ファイル名分岐":
+                        filename_mapping_entry = widgets['calc_fallback_filename']
+                        # プレースホルダが表示されている場合は空文字列として扱う
+                        if hasattr(filename_mapping_entry, '_showing_placeholder') and filename_mapping_entry._showing_placeholder:
+                            filename_mapping_value = ""
+                        else:
+                            filename_mapping_value = filename_mapping_entry.get()
+                        fallback_data['filename_mapping'] = filename_mapping_value
+                        # デフォルト値を保存
+                        filename_default_entry = widgets['calc_fallback_filename_default']
+                        if hasattr(filename_default_entry, '_showing_placeholder') and filename_default_entry._showing_placeholder:
+                            filename_default_value = ""
+                        else:
+                            filename_default_value = filename_default_entry.get()
+                        fallback_data['default'] = filename_default_value
+                    mapping_data[out_col]['fallback'] = fallback_data
             elif mapping_type == "複数カラム四則演算":
                 mapping_data[out_col]['column1'] = widgets['multi_col1_combo'].get()
                 mapping_data[out_col]['operator'] = widgets['multi_op_combo'].get()
                 mapping_data[out_col]['column2'] = widgets['multi_col2_combo'].get()
                 # 補完処理を保存（fallback_typeに値があれば有効）
                 fallback_type = widgets['multi_calc_fallback_type'].get()
-                if fallback_type:
-                    mapping_data[out_col]['fallback'] = {
-                        'type': fallback_type,
-                        'fixed_value': widgets['multi_calc_fallback_fixed'].get(),
-                        'column': widgets['multi_calc_fallback_column'].get(),
-                        'filename_mapping': widgets['multi_calc_fallback_filename'].get()
-                    }
+                if fallback_type and fallback_type != "－":
+                    fallback_data = {'type': fallback_type}
+                    if fallback_type == "固定値":
+                        fallback_data['value'] = widgets['multi_calc_fallback_fixed'].get()
+                    elif fallback_type == "カラム条件分岐":
+                        fallback_data['column'] = widgets['multi_calc_fallback_column'].get()
+                        # 条件文字列を解析して保存
+                        column_mapping_entry = widgets['multi_calc_fallback_column_mapping']
+                        # プレースホルダが表示されている場合は空文字列として扱う
+                        if hasattr(column_mapping_entry, '_showing_placeholder') and column_mapping_entry._showing_placeholder:
+                            column_mapping_value = ""
+                        else:
+                            column_mapping_value = column_mapping_entry.get()
+                        conditions = []
+                        if column_mapping_value:
+                            # カンマで分割して各条件を解析
+                            for item in column_mapping_value.split(','):
+                                item = item.strip()
+                                if '=' in item:
+                                    parts = item.split('=', 1)
+                                    input_val = parts[0].strip()
+                                    output_val = parts[1].strip()
+                                    if input_val:  # 入力値が空でない場合のみ保存
+                                        conditions.append({'input': input_val, 'output': output_val})
+                        fallback_data['conditions'] = conditions
+                        # デフォルト値を保存
+                        column_default_entry = widgets['multi_calc_fallback_column_default']
+                        # プレースホルダが表示されている場合は空文字列として扱う
+                        if hasattr(column_default_entry, '_showing_placeholder') and column_default_entry._showing_placeholder:
+                            column_default_value = ""
+                        else:
+                            column_default_value = column_default_entry.get()
+                        fallback_data['default'] = column_default_value
+                    elif fallback_type == "ファイル名分岐":
+                        filename_mapping_entry = widgets['multi_calc_fallback_filename']
+                        # プレースホルダが表示されている場合は空文字列として扱う
+                        if hasattr(filename_mapping_entry, '_showing_placeholder') and filename_mapping_entry._showing_placeholder:
+                            filename_mapping_value = ""
+                        else:
+                            filename_mapping_value = filename_mapping_entry.get()
+                        fallback_data['filename_mapping'] = filename_mapping_value
+                        # デフォルト値を保存
+                        filename_default_entry = widgets['multi_calc_fallback_filename_default']
+                        if hasattr(filename_default_entry, '_showing_placeholder') and filename_default_entry._showing_placeholder:
+                            filename_default_value = ""
+                        else:
+                            filename_default_value = filename_default_entry.get()
+                        fallback_data['default'] = filename_default_value
+                    mapping_data[out_col]['fallback'] = fallback_data
             elif mapping_type == "複数カラム抽出":
-                mapping_data[out_col]['mode'] = widgets['extract_mode_combo'].get()
                 # カンマ区切り文字列から配列に変換
                 columns_str = widgets['extract_columns_entry'].get().strip()
                 if columns_str:
@@ -1441,15 +1818,58 @@ class ShapefileNormalizerApp:
                 else:
                     columns = []
                 mapping_data[out_col]['columns'] = columns
+                mapping_data[out_col]['operator'] = widgets['extract_mode_combo'].get()
                 # 補完処理を保存（fallback_typeに値があれば有効）
                 fallback_type = widgets['extract_fallback_type'].get()
-                if fallback_type:
-                    mapping_data[out_col]['fallback'] = {
-                        'type': fallback_type,
-                        'fixed_value': widgets['extract_fallback_fixed'].get(),
-                        'column': widgets['extract_fallback_column'].get(),
-                        'filename_mapping': widgets['extract_fallback_filename'].get()
-                    }
+                if fallback_type and fallback_type != "－":
+                    fallback_data = {'type': fallback_type}
+                    if fallback_type == "固定値":
+                        fallback_data['value'] = widgets['extract_fallback_fixed'].get()
+                    elif fallback_type == "カラム条件分岐":
+                        fallback_data['column'] = widgets['extract_fallback_column'].get()
+                        # 条件文字列を解析して保存
+                        column_mapping_entry = widgets['extract_fallback_column_mapping']
+                        # プレースホルダが表示されている場合は空文字列として扱う
+                        if hasattr(column_mapping_entry, '_showing_placeholder') and column_mapping_entry._showing_placeholder:
+                            column_mapping_value = ""
+                        else:
+                            column_mapping_value = column_mapping_entry.get()
+                        conditions = []
+                        if column_mapping_value:
+                            # カンマで分割して各条件を解析
+                            for item in column_mapping_value.split(','):
+                                item = item.strip()
+                                if '=' in item:
+                                    parts = item.split('=', 1)
+                                    input_val = parts[0].strip()
+                                    output_val = parts[1].strip()
+                                    if input_val:  # 入力値が空でない場合のみ保存
+                                        conditions.append({'input': input_val, 'output': output_val})
+                        fallback_data['conditions'] = conditions
+                        # デフォルト値を保存
+                        column_default_entry = widgets['extract_fallback_column_default']
+                        # プレースホルダが表示されている場合は空文字列として扱う
+                        if hasattr(column_default_entry, '_showing_placeholder') and column_default_entry._showing_placeholder:
+                            column_default_value = ""
+                        else:
+                            column_default_value = column_default_entry.get()
+                        fallback_data['default'] = column_default_value
+                    elif fallback_type == "ファイル名分岐":
+                        filename_mapping_entry = widgets['extract_fallback_filename']
+                        # プレースホルダが表示されている場合は空文字列として扱う
+                        if hasattr(filename_mapping_entry, '_showing_placeholder') and filename_mapping_entry._showing_placeholder:
+                            filename_mapping_value = ""
+                        else:
+                            filename_mapping_value = filename_mapping_entry.get()
+                        fallback_data['filename_mapping'] = filename_mapping_value
+                        # デフォルト値を保存
+                        filename_default_entry = widgets['extract_fallback_filename_default']
+                        if hasattr(filename_default_entry, '_showing_placeholder') and filename_default_entry._showing_placeholder:
+                            filename_default_value = ""
+                        else:
+                            filename_default_value = filename_default_entry.get()
+                        fallback_data['default'] = filename_default_value
+                    mapping_data[out_col]['fallback'] = fallback_data
             elif mapping_type == "固定値":
                 mapping_data[out_col]['value'] = widgets['fixed_entry'].get()
             elif mapping_type == "ファイル名":
@@ -1545,19 +1965,122 @@ class ShapefileNormalizerApp:
                     # タイプに応じて適切なウィジェットを表示
                     if fallback_type == "固定値":
                         widgets['assign_fallback_column'].grid_forget()
+                        widgets['assign_fallback_column_mapping'].grid_forget()
+                        widgets['assign_fallback_column_default'].grid_forget()
+                        widgets['assign_fallback_filename'].grid_forget()
                         widgets['assign_fallback_fixed'].delete(0, tk.END)
-                        widgets['assign_fallback_fixed'].insert(0, fallback.get('fixed_value', ''))
+                        # 新形式'value'と旧形式'fixed_value'の両方をサポート
+                        value = fallback.get('value', fallback.get('fixed_value', ''))
+                        widgets['assign_fallback_fixed'].insert(0, value)
                         widgets['assign_fallback_fixed'].grid(row=0, column=0, sticky="w")
-                    elif fallback_type == "他カラム":
+                    elif fallback_type == "カラム条件分岐":
                         widgets['assign_fallback_fixed'].grid_forget()
+                        widgets['assign_fallback_filename'].grid_forget()
                         widgets['assign_fallback_column']['values'] = self.input_columns if self.input_columns else []
                         widgets['assign_fallback_column'].set(fallback.get('column', ''))
                         widgets['assign_fallback_column'].grid(row=0, column=0, sticky="w")
-                    elif fallback_type == "ファイル名":
+                        # 条件配列を文字列に変換して復元
+                        conditions = fallback.get('conditions', [])
+                        condition_str = ','.join([f"{c.get('input', '')}={c.get('output', '')}" for c in conditions])
+
+                        # 条件マッピング入力欄のプレースホルダー設定
+                        mapping_entry = widgets['assign_fallback_column_mapping']
+                        mapping_placeholder = "入力値=出力値,..."
+                        mapping_entry.delete(0, tk.END)
+                        on_focus_in_mapping, on_focus_out_mapping = self.create_placeholder_handlers(mapping_entry, mapping_placeholder)
+                        mapping_entry.unbind('<FocusIn>')
+                        mapping_entry.unbind('<FocusOut>')
+                        mapping_entry.unbind('<Button-1>')
+                        mapping_entry.bind('<FocusIn>', on_focus_in_mapping)
+                        mapping_entry.bind('<FocusOut>', on_focus_out_mapping)
+
+                        if condition_str:
+                            mapping_entry.insert(0, condition_str)
+                            mapping_entry.config(foreground='black')
+                            mapping_entry._showing_placeholder = False
+                        else:
+                            mapping_entry.insert(0, mapping_placeholder)
+                            mapping_entry.config(foreground='gray')
+                            mapping_entry._showing_placeholder = True
+                        mapping_entry.grid(row=0, column=1, sticky="w", padx=(5, 0))
+
+                        # デフォルト値入力欄のプレースホルダー設定
+                        default_entry = widgets['assign_fallback_column_default']
+                        default_placeholder = "デフォルト"
+                        column_default = fallback.get('default', '')
+                        default_entry.delete(0, tk.END)
+                        default_entry._placeholder = default_placeholder
+                        on_focus_in_default, on_focus_out_default = self.create_placeholder_handlers(default_entry, default_placeholder)
+                        default_entry.unbind('<FocusIn>')
+                        default_entry.unbind('<FocusOut>')
+                        default_entry.unbind('<Button-1>')
+                        default_entry.bind('<FocusIn>', on_focus_in_default)
+                        default_entry.bind('<FocusOut>', on_focus_out_default)
+
+                        if column_default:
+                            default_entry.insert(0, column_default)
+                            default_entry.config(foreground='black')
+                            default_entry._showing_placeholder = False
+                        else:
+                            default_entry.insert(0, default_placeholder)
+                            default_entry.config(foreground='gray')
+                            default_entry._showing_placeholder = True
+                        default_entry.grid(row=0, column=2, sticky="w", padx=(5, 0))
+                    elif fallback_type == "ファイル名分岐":
                         widgets['assign_fallback_column'].grid_forget()
-                        widgets['assign_fallback_filename'].delete(0, tk.END)
-                        widgets['assign_fallback_filename'].insert(0, fallback.get('filename_mapping', ''))
-                        widgets['assign_fallback_filename'].grid(row=0, column=0, sticky="w")
+                        widgets['assign_fallback_column_mapping'].grid_forget()
+                        widgets['assign_fallback_column_default'].grid_forget()
+
+                        # ファイル名マッピング入力欄のプレースホルダー設定
+                        mapping_entry = widgets['assign_fallback_filename']
+                        mapping_placeholder = "ファイル名=出力値,..."
+                        mapping_entry.delete(0, tk.END)
+                        mapping_entry._placeholder = mapping_placeholder
+                        on_focus_in_mapping, on_focus_out_mapping = self.create_placeholder_handlers(mapping_entry, mapping_placeholder)
+                        mapping_entry.unbind('<FocusIn>')
+                        mapping_entry.unbind('<FocusOut>')
+                        mapping_entry.unbind('<Button-1>')
+                        mapping_entry.bind('<FocusIn>', on_focus_in_mapping)
+                        mapping_entry.bind('<FocusOut>', on_focus_out_mapping)
+
+                        filename_value = fallback.get('filename_mapping', '')
+                        if filename_value:
+                            # 値がある場合は通常表示
+                            mapping_entry.insert(0, filename_value)
+                            mapping_entry.config(foreground='black')
+                            mapping_entry._showing_placeholder = False
+                        else:
+                            # 値がない場合はプレースホルダ表示
+                            mapping_entry.insert(0, mapping_placeholder)
+                            mapping_entry.config(foreground='gray')
+                            mapping_entry._showing_placeholder = True
+                        mapping_entry.grid(row=0, column=0, sticky="w")
+
+                        # デフォルト値入力欄のプレースホルダー設定
+                        default_entry = widgets['assign_fallback_filename_default']
+                        default_placeholder = "デフォルト"
+                        filename_default = fallback.get('default', '')
+                        default_entry.delete(0, tk.END)
+                        default_entry._placeholder = default_placeholder
+                        on_focus_in_default, on_focus_out_default = self.create_placeholder_handlers(default_entry, default_placeholder)
+                        default_entry.unbind('<FocusIn>')
+                        default_entry.unbind('<FocusOut>')
+                        default_entry.unbind('<Button-1>')
+                        default_entry.bind('<FocusIn>', on_focus_in_default)
+                        default_entry.bind('<FocusOut>', on_focus_out_default)
+
+                        if filename_default:
+                            default_entry.insert(0, filename_default)
+                            default_entry.config(foreground='black')
+                            default_entry._showing_placeholder = False
+                        else:
+                            default_entry.insert(0, default_placeholder)
+                            default_entry.config(foreground='gray')
+                            default_entry._showing_placeholder = True
+                        default_entry.grid(row=0, column=1, sticky="w", padx=(5, 0))
+                else:
+                    # 補完データがない場合は「－」を設定
+                    widgets['assign_fallback_type'].set("－")
             elif mapping_type == "カラム四則演算":
                 widgets['calc_col_combo'].set(saved_data.get('column', ''))
                 widgets['calc_op_combo'].set(saved_data.get('operator', ''))
@@ -1570,19 +2093,122 @@ class ShapefileNormalizerApp:
                     widgets['calc_fallback_type'].set(fallback_type)
                     if fallback_type == "固定値":
                         widgets['calc_fallback_column'].grid_forget()
+                        widgets['calc_fallback_column_mapping'].grid_forget()
+                        widgets['calc_fallback_column_default'].grid_forget()
+                        widgets['calc_fallback_filename'].grid_forget()
                         widgets['calc_fallback_fixed'].delete(0, tk.END)
-                        widgets['calc_fallback_fixed'].insert(0, fallback.get('fixed_value', ''))
+                        # 新形式'value'と旧形式'fixed_value'の両方をサポート
+                        value = fallback.get('value', fallback.get('fixed_value', ''))
+                        widgets['calc_fallback_fixed'].insert(0, value)
                         widgets['calc_fallback_fixed'].grid(row=0, column=0, sticky="w")
-                    elif fallback_type == "他カラム":
+                    elif fallback_type == "カラム条件分岐":
                         widgets['calc_fallback_fixed'].grid_forget()
+                        widgets['calc_fallback_filename'].grid_forget()
                         widgets['calc_fallback_column']['values'] = self.input_columns if self.input_columns else []
                         widgets['calc_fallback_column'].set(fallback.get('column', ''))
                         widgets['calc_fallback_column'].grid(row=0, column=0, sticky="w")
-                    elif fallback_type == "ファイル名":
+                        # 条件配列を文字列に変換して復元
+                        conditions = fallback.get('conditions', [])
+                        condition_str = ','.join([f"{c.get('input', '')}={c.get('output', '')}" for c in conditions])
+
+                        # 条件マッピング入力欄のプレースホルダー設定
+                        mapping_entry = widgets['calc_fallback_column_mapping']
+                        mapping_placeholder = "入力値=出力値,..."
+                        mapping_entry.delete(0, tk.END)
+                        on_focus_in_mapping, on_focus_out_mapping = self.create_placeholder_handlers(mapping_entry, mapping_placeholder)
+                        mapping_entry.unbind('<FocusIn>')
+                        mapping_entry.unbind('<FocusOut>')
+                        mapping_entry.unbind('<Button-1>')
+                        mapping_entry.bind('<FocusIn>', on_focus_in_mapping)
+                        mapping_entry.bind('<FocusOut>', on_focus_out_mapping)
+
+                        if condition_str:
+                            mapping_entry.insert(0, condition_str)
+                            mapping_entry.config(foreground='black')
+                            mapping_entry._showing_placeholder = False
+                        else:
+                            mapping_entry.insert(0, mapping_placeholder)
+                            mapping_entry.config(foreground='gray')
+                            mapping_entry._showing_placeholder = True
+                        mapping_entry.grid(row=0, column=1, sticky="w", padx=(5, 0))
+
+                        # デフォルト値入力欄のプレースホルダー設定
+                        default_entry = widgets['calc_fallback_column_default']
+                        default_placeholder = "デフォルト"
+                        column_default = fallback.get('default', '')
+                        default_entry.delete(0, tk.END)
+                        default_entry._placeholder = default_placeholder
+                        on_focus_in_default, on_focus_out_default = self.create_placeholder_handlers(default_entry, default_placeholder)
+                        default_entry.unbind('<FocusIn>')
+                        default_entry.unbind('<FocusOut>')
+                        default_entry.unbind('<Button-1>')
+                        default_entry.bind('<FocusIn>', on_focus_in_default)
+                        default_entry.bind('<FocusOut>', on_focus_out_default)
+
+                        if column_default:
+                            default_entry.insert(0, column_default)
+                            default_entry.config(foreground='black')
+                            default_entry._showing_placeholder = False
+                        else:
+                            default_entry.insert(0, default_placeholder)
+                            default_entry.config(foreground='gray')
+                            default_entry._showing_placeholder = True
+                        default_entry.grid(row=0, column=2, sticky="w", padx=(5, 0))
+                    elif fallback_type == "ファイル名分岐":
                         widgets['calc_fallback_column'].grid_forget()
-                        widgets['calc_fallback_filename'].delete(0, tk.END)
-                        widgets['calc_fallback_filename'].insert(0, fallback.get('filename_mapping', ''))
-                        widgets['calc_fallback_filename'].grid(row=0, column=0, sticky="w")
+                        widgets['calc_fallback_column_mapping'].grid_forget()
+                        widgets['calc_fallback_column_default'].grid_forget()
+
+                        # ファイル名マッピング入力欄のプレースホルダー設定
+                        mapping_entry = widgets['calc_fallback_filename']
+                        mapping_placeholder = "ファイル名=出力値,..."
+                        mapping_entry.delete(0, tk.END)
+                        mapping_entry._placeholder = mapping_placeholder
+                        on_focus_in_mapping, on_focus_out_mapping = self.create_placeholder_handlers(mapping_entry, mapping_placeholder)
+                        mapping_entry.unbind('<FocusIn>')
+                        mapping_entry.unbind('<FocusOut>')
+                        mapping_entry.unbind('<Button-1>')
+                        mapping_entry.bind('<FocusIn>', on_focus_in_mapping)
+                        mapping_entry.bind('<FocusOut>', on_focus_out_mapping)
+
+                        filename_value = fallback.get('filename_mapping', '')
+                        if filename_value:
+                            # 値がある場合は通常表示
+                            mapping_entry.insert(0, filename_value)
+                            mapping_entry.config(foreground='black')
+                            mapping_entry._showing_placeholder = False
+                        else:
+                            # 値がない場合はプレースホルダ表示
+                            mapping_entry.insert(0, mapping_placeholder)
+                            mapping_entry.config(foreground='gray')
+                            mapping_entry._showing_placeholder = True
+                        mapping_entry.grid(row=0, column=0, sticky="w")
+
+                        # デフォルト値入力欄のプレースホルダー設定
+                        default_entry = widgets['calc_fallback_filename_default']
+                        default_placeholder = "デフォルト"
+                        filename_default = fallback.get('default', '')
+                        default_entry.delete(0, tk.END)
+                        default_entry._placeholder = default_placeholder
+                        on_focus_in_default, on_focus_out_default = self.create_placeholder_handlers(default_entry, default_placeholder)
+                        default_entry.unbind('<FocusIn>')
+                        default_entry.unbind('<FocusOut>')
+                        default_entry.unbind('<Button-1>')
+                        default_entry.bind('<FocusIn>', on_focus_in_default)
+                        default_entry.bind('<FocusOut>', on_focus_out_default)
+
+                        if filename_default:
+                            default_entry.insert(0, filename_default)
+                            default_entry.config(foreground='black')
+                            default_entry._showing_placeholder = False
+                        else:
+                            default_entry.insert(0, default_placeholder)
+                            default_entry.config(foreground='gray')
+                            default_entry._showing_placeholder = True
+                        default_entry.grid(row=0, column=1, sticky="w", padx=(5, 0))
+                else:
+                    # 補完データがない場合は「－」を設定
+                    widgets['calc_fallback_type'].set("－")
             elif mapping_type == "複数カラム四則演算":
                 widgets['multi_col1_combo'].set(saved_data.get('column1', ''))
                 widgets['multi_op_combo'].set(saved_data.get('operator', ''))
@@ -1594,21 +2220,126 @@ class ShapefileNormalizerApp:
                     widgets['multi_calc_fallback_type'].set(fallback_type)
                     if fallback_type == "固定値":
                         widgets['multi_calc_fallback_column'].grid_forget()
+                        widgets['multi_calc_fallback_column_mapping'].grid_forget()
+                        widgets['multi_calc_fallback_column_default'].grid_forget()
+                        widgets['multi_calc_fallback_filename'].grid_forget()
                         widgets['multi_calc_fallback_fixed'].delete(0, tk.END)
-                        widgets['multi_calc_fallback_fixed'].insert(0, fallback.get('fixed_value', ''))
+                        # 新形式'value'と旧形式'fixed_value'の両方をサポート
+                        value = fallback.get('value', fallback.get('fixed_value', ''))
+                        widgets['multi_calc_fallback_fixed'].insert(0, value)
                         widgets['multi_calc_fallback_fixed'].grid(row=0, column=0, sticky="w")
-                    elif fallback_type == "他カラム":
+                    elif fallback_type == "カラム条件分岐":
                         widgets['multi_calc_fallback_fixed'].grid_forget()
+                        widgets['multi_calc_fallback_filename'].grid_forget()
                         widgets['multi_calc_fallback_column']['values'] = self.input_columns if self.input_columns else []
                         widgets['multi_calc_fallback_column'].set(fallback.get('column', ''))
                         widgets['multi_calc_fallback_column'].grid(row=0, column=0, sticky="w")
-                    elif fallback_type == "ファイル名":
+                        # 条件配列を文字列に変換して復元
+                        conditions = fallback.get('conditions', [])
+                        condition_str = ','.join([f"{c.get('input', '')}={c.get('output', '')}" for c in conditions])
+
+                        # 条件マッピング入力欄のプレースホルダー設定
+                        mapping_entry = widgets['multi_calc_fallback_column_mapping']
+                        mapping_placeholder = "入力値=出力値,..."
+                        mapping_entry.delete(0, tk.END)
+                        on_focus_in_mapping, on_focus_out_mapping = self.create_placeholder_handlers(mapping_entry, mapping_placeholder)
+                        mapping_entry.unbind('<FocusIn>')
+                        mapping_entry.unbind('<FocusOut>')
+                        mapping_entry.unbind('<Button-1>')
+                        mapping_entry.bind('<FocusIn>', on_focus_in_mapping)
+                        mapping_entry.bind('<FocusOut>', on_focus_out_mapping)
+
+                        if condition_str:
+                            mapping_entry.insert(0, condition_str)
+                            mapping_entry.config(foreground='black')
+                            mapping_entry._showing_placeholder = False
+                        else:
+                            mapping_entry.insert(0, mapping_placeholder)
+                            mapping_entry.config(foreground='gray')
+                            mapping_entry._showing_placeholder = True
+                        mapping_entry.grid(row=0, column=1, sticky="w", padx=(5, 0))
+
+                        # デフォルト値入力欄のプレースホルダー設定
+                        default_entry = widgets['multi_calc_fallback_column_default']
+                        default_placeholder = "デフォルト"
+                        column_default = fallback.get('default', '')
+                        default_entry.delete(0, tk.END)
+                        default_entry._placeholder = default_placeholder
+                        on_focus_in_default, on_focus_out_default = self.create_placeholder_handlers(default_entry, default_placeholder)
+                        default_entry.unbind('<FocusIn>')
+                        default_entry.unbind('<FocusOut>')
+                        default_entry.unbind('<Button-1>')
+                        default_entry.bind('<FocusIn>', on_focus_in_default)
+                        default_entry.bind('<FocusOut>', on_focus_out_default)
+
+                        if column_default:
+                            default_entry.insert(0, column_default)
+                            default_entry.config(foreground='black')
+                            default_entry._showing_placeholder = False
+                        else:
+                            default_entry.insert(0, default_placeholder)
+                            default_entry.config(foreground='gray')
+                            default_entry._showing_placeholder = True
+                        default_entry.grid(row=0, column=2, sticky="w", padx=(5, 0))
+                    elif fallback_type == "ファイル名分岐":
                         widgets['multi_calc_fallback_column'].grid_forget()
-                        widgets['multi_calc_fallback_filename'].delete(0, tk.END)
-                        widgets['multi_calc_fallback_filename'].insert(0, fallback.get('filename_mapping', ''))
-                        widgets['multi_calc_fallback_filename'].grid(row=0, column=0, sticky="w")
+                        widgets['multi_calc_fallback_column_mapping'].grid_forget()
+                        widgets['multi_calc_fallback_column_default'].grid_forget()
+
+                        # ファイル名マッピング入力欄のプレースホルダー設定
+                        mapping_entry = widgets['multi_calc_fallback_filename']
+                        mapping_placeholder = "ファイル名=出力値,..."
+                        mapping_entry.delete(0, tk.END)
+                        mapping_entry._placeholder = mapping_placeholder
+                        on_focus_in_mapping, on_focus_out_mapping = self.create_placeholder_handlers(mapping_entry, mapping_placeholder)
+                        mapping_entry.unbind('<FocusIn>')
+                        mapping_entry.unbind('<FocusOut>')
+                        mapping_entry.unbind('<Button-1>')
+                        mapping_entry.bind('<FocusIn>', on_focus_in_mapping)
+                        mapping_entry.bind('<FocusOut>', on_focus_out_mapping)
+
+                        filename_value = fallback.get('filename_mapping', '')
+                        if filename_value:
+                            # 値がある場合は通常表示
+                            mapping_entry.insert(0, filename_value)
+                            mapping_entry.config(foreground='black')
+                            mapping_entry._showing_placeholder = False
+                        else:
+                            # 値がない場合はプレースホルダ表示
+                            mapping_entry.insert(0, mapping_placeholder)
+                            mapping_entry.config(foreground='gray')
+                            mapping_entry._showing_placeholder = True
+                        mapping_entry.grid(row=0, column=0, sticky="w")
+
+                        # デフォルト値入力欄のプレースホルダー設定
+                        default_entry = widgets['multi_calc_fallback_filename_default']
+                        default_placeholder = "デフォルト"
+                        filename_default = fallback.get('default', '')
+                        default_entry.delete(0, tk.END)
+                        default_entry._placeholder = default_placeholder
+                        on_focus_in_default, on_focus_out_default = self.create_placeholder_handlers(default_entry, default_placeholder)
+                        default_entry.unbind('<FocusIn>')
+                        default_entry.unbind('<FocusOut>')
+                        default_entry.unbind('<Button-1>')
+                        default_entry.bind('<FocusIn>', on_focus_in_default)
+                        default_entry.bind('<FocusOut>', on_focus_out_default)
+
+                        if filename_default:
+                            default_entry.insert(0, filename_default)
+                            default_entry.config(foreground='black')
+                            default_entry._showing_placeholder = False
+                        else:
+                            default_entry.insert(0, default_placeholder)
+                            default_entry.config(foreground='gray')
+                            default_entry._showing_placeholder = True
+                        default_entry.grid(row=0, column=1, sticky="w", padx=(5, 0))
+                else:
+                    # 補完データがない場合は「－」を設定
+                    widgets['multi_calc_fallback_type'].set("－")
             elif mapping_type == "複数カラム抽出":
-                widgets['extract_mode_combo'].set(saved_data.get('mode', ''))
+                # 後方互換性のため 'mode' もサポート
+                operator = saved_data.get('operator', saved_data.get('mode', ''))
+                widgets['extract_mode_combo'].set(operator)
                 columns = saved_data.get('columns', [])
                 # 配列をカンマ区切り文字列に変換して表示
                 columns_filtered = [col for col in columns if col and col != 'None']
@@ -1625,19 +2356,122 @@ class ShapefileNormalizerApp:
                     widgets['extract_fallback_type'].set(fallback_type)
                     if fallback_type == "固定値":
                         widgets['extract_fallback_column'].grid_forget()
+                        widgets['extract_fallback_column_mapping'].grid_forget()
+                        widgets['extract_fallback_column_default'].grid_forget()
+                        widgets['extract_fallback_filename'].grid_forget()
                         widgets['extract_fallback_fixed'].delete(0, tk.END)
-                        widgets['extract_fallback_fixed'].insert(0, fallback.get('fixed_value', ''))
+                        # 新形式'value'と旧形式'fixed_value'の両方をサポート
+                        value = fallback.get('value', fallback.get('fixed_value', ''))
+                        widgets['extract_fallback_fixed'].insert(0, value)
                         widgets['extract_fallback_fixed'].grid(row=0, column=0, sticky="w")
-                    elif fallback_type == "他カラム":
+                    elif fallback_type == "カラム条件分岐":
                         widgets['extract_fallback_fixed'].grid_forget()
+                        widgets['extract_fallback_filename'].grid_forget()
                         widgets['extract_fallback_column']['values'] = self.input_columns if self.input_columns else []
                         widgets['extract_fallback_column'].set(fallback.get('column', ''))
                         widgets['extract_fallback_column'].grid(row=0, column=0, sticky="w")
-                    elif fallback_type == "ファイル名":
+                        # 条件配列を文字列に変換して復元
+                        conditions = fallback.get('conditions', [])
+                        condition_str = ','.join([f"{c.get('input', '')}={c.get('output', '')}" for c in conditions])
+
+                        # 条件マッピング入力欄のプレースホルダー設定
+                        mapping_entry = widgets['extract_fallback_column_mapping']
+                        mapping_placeholder = "入力値=出力値,..."
+                        mapping_entry.delete(0, tk.END)
+                        on_focus_in_mapping, on_focus_out_mapping = self.create_placeholder_handlers(mapping_entry, mapping_placeholder)
+                        mapping_entry.unbind('<FocusIn>')
+                        mapping_entry.unbind('<FocusOut>')
+                        mapping_entry.unbind('<Button-1>')
+                        mapping_entry.bind('<FocusIn>', on_focus_in_mapping)
+                        mapping_entry.bind('<FocusOut>', on_focus_out_mapping)
+
+                        if condition_str:
+                            mapping_entry.insert(0, condition_str)
+                            mapping_entry.config(foreground='black')
+                            mapping_entry._showing_placeholder = False
+                        else:
+                            mapping_entry.insert(0, mapping_placeholder)
+                            mapping_entry.config(foreground='gray')
+                            mapping_entry._showing_placeholder = True
+                        mapping_entry.grid(row=0, column=1, sticky="w", padx=(5, 0))
+
+                        # デフォルト値入力欄のプレースホルダー設定
+                        default_entry = widgets['extract_fallback_column_default']
+                        default_placeholder = "デフォルト"
+                        column_default = fallback.get('default', '')
+                        default_entry.delete(0, tk.END)
+                        default_entry._placeholder = default_placeholder
+                        on_focus_in_default, on_focus_out_default = self.create_placeholder_handlers(default_entry, default_placeholder)
+                        default_entry.unbind('<FocusIn>')
+                        default_entry.unbind('<FocusOut>')
+                        default_entry.unbind('<Button-1>')
+                        default_entry.bind('<FocusIn>', on_focus_in_default)
+                        default_entry.bind('<FocusOut>', on_focus_out_default)
+
+                        if column_default:
+                            default_entry.insert(0, column_default)
+                            default_entry.config(foreground='black')
+                            default_entry._showing_placeholder = False
+                        else:
+                            default_entry.insert(0, default_placeholder)
+                            default_entry.config(foreground='gray')
+                            default_entry._showing_placeholder = True
+                        default_entry.grid(row=0, column=2, sticky="w", padx=(5, 0))
+                    elif fallback_type == "ファイル名分岐":
                         widgets['extract_fallback_column'].grid_forget()
-                        widgets['extract_fallback_filename'].delete(0, tk.END)
-                        widgets['extract_fallback_filename'].insert(0, fallback.get('filename_mapping', ''))
-                        widgets['extract_fallback_filename'].grid(row=0, column=0, sticky="w")
+                        widgets['extract_fallback_column_mapping'].grid_forget()
+                        widgets['extract_fallback_column_default'].grid_forget()
+
+                        # ファイル名マッピング入力欄のプレースホルダー設定
+                        mapping_entry = widgets['extract_fallback_filename']
+                        mapping_placeholder = "ファイル名=出力値,..."
+                        mapping_entry.delete(0, tk.END)
+                        mapping_entry._placeholder = mapping_placeholder
+                        on_focus_in_mapping, on_focus_out_mapping = self.create_placeholder_handlers(mapping_entry, mapping_placeholder)
+                        mapping_entry.unbind('<FocusIn>')
+                        mapping_entry.unbind('<FocusOut>')
+                        mapping_entry.unbind('<Button-1>')
+                        mapping_entry.bind('<FocusIn>', on_focus_in_mapping)
+                        mapping_entry.bind('<FocusOut>', on_focus_out_mapping)
+
+                        filename_value = fallback.get('filename_mapping', '')
+                        if filename_value:
+                            # 値がある場合は通常表示
+                            mapping_entry.insert(0, filename_value)
+                            mapping_entry.config(foreground='black')
+                            mapping_entry._showing_placeholder = False
+                        else:
+                            # 値がない場合はプレースホルダ表示
+                            mapping_entry.insert(0, mapping_placeholder)
+                            mapping_entry.config(foreground='gray')
+                            mapping_entry._showing_placeholder = True
+                        mapping_entry.grid(row=0, column=0, sticky="w")
+
+                        # デフォルト値入力欄のプレースホルダー設定
+                        default_entry = widgets['extract_fallback_filename_default']
+                        default_placeholder = "デフォルト"
+                        filename_default = fallback.get('default', '')
+                        default_entry.delete(0, tk.END)
+                        default_entry._placeholder = default_placeholder
+                        on_focus_in_default, on_focus_out_default = self.create_placeholder_handlers(default_entry, default_placeholder)
+                        default_entry.unbind('<FocusIn>')
+                        default_entry.unbind('<FocusOut>')
+                        default_entry.unbind('<Button-1>')
+                        default_entry.bind('<FocusIn>', on_focus_in_default)
+                        default_entry.bind('<FocusOut>', on_focus_out_default)
+
+                        if filename_default:
+                            default_entry.insert(0, filename_default)
+                            default_entry.config(foreground='black')
+                            default_entry._showing_placeholder = False
+                        else:
+                            default_entry.insert(0, default_placeholder)
+                            default_entry.config(foreground='gray')
+                            default_entry._showing_placeholder = True
+                        default_entry.grid(row=0, column=1, sticky="w", padx=(5, 0))
+                else:
+                    # 補完データがない場合は「－」を設定
+                    widgets['extract_fallback_type'].set("－")
             elif mapping_type == "固定値":
                 widgets['fixed_entry'].delete(0, tk.END)
                 widgets['fixed_entry'].insert(0, saved_data.get('value', ''))
@@ -2381,7 +3215,7 @@ class ShapefileNormalizerApp:
         
         # 既存のコンボボックスにカラムリストを設定
         if self.current_mapping_widgets:
-            for out_col, widgets in self.current_mapping_widgets.items():
+            for _, widgets in self.current_mapping_widgets.items():
                 # 各種カラム選択コンボボックスを更新
                 widgets['assign_combo']['values'] = self.input_columns
                 widgets['assign_fallback_column']['values'] = self.input_columns
@@ -2646,13 +3480,22 @@ class ShapefileNormalizerApp:
         try:
             # 現在のUIの設定を保存
             self.save_current_mapping_to_definition()
-            
+
+            # カラムマッピングのキーを和名から英名に変換
+            column_mappings_en = {}
+            for def_name, mapping in self.column_mappings.items():
+                column_mappings_en[def_name] = {}
+                for col_name_ja, col_config in mapping.items():
+                    # 和名を英名に変換（マッピングにない場合はそのまま）
+                    col_name_en = self.column_name_mapping.get(col_name_ja, col_name_ja)
+                    column_mappings_en[def_name][col_name_en] = col_config
+
             config = {
                 'min_distance': self.min_distance.get(),
                 'source_epsg': self.source_epsg.get(),
                 'target_epsg': self.target_epsg.get(),
                 'source_encoding': self.source_encoding.get(),
-                'column_mappings': self.column_mappings,  # 複数のマッピング定義
+                'column_mappings': column_mappings_en,  # 複数のマッピング定義（英名キー）
                 'column_mappings_meta': self.column_mappings_meta,  # メタ情報（タイプなど）
                 'file_mapping': self.file_mapping,  # ファイルごとのマッピング割り当て
                 'file_specific_settings': self.file_specific_settings,  # ファイルごとのEPSG・文字コード設定
@@ -2695,7 +3538,7 @@ class ShapefileNormalizerApp:
                         os.makedirs(config_dir, exist_ok=True)
                     
                     default_config = {
-                        'min_distance': self.min_distance.get(),
+                        'min_distance': 0,  # 最小頂点距離は常に0
                         'source_epsg': self.source_epsg.get(),
                         'target_epsg': self.target_epsg.get(),
                         'source_encoding': self.source_encoding.get(),
@@ -2714,8 +3557,8 @@ class ShapefileNormalizerApp:
                 config = json.load(f)
             
             # 処理設定を読み込み
-            if 'min_distance' in config:
-                self.min_distance.set(config['min_distance'])
+            # 最小頂点距離は常に0を設定（config.jsonの値は無視）
+            self.min_distance.set(0)
             if 'source_epsg' in config:
                 self.source_epsg.set(config['source_epsg'])
             if 'target_epsg' in config:
@@ -2723,13 +3566,27 @@ class ShapefileNormalizerApp:
             if 'source_encoding' in config:
                 self.source_encoding.set(config['source_encoding'])
             
+            # 英名→和名の逆マッピングを作成
+            en_to_ja_mapping = {en: ja for ja, en in self.column_name_mapping.items()}
+
             # 複数マッピング定義に対応（旧形式との互換性あり）
             if 'column_mappings' in config:
-                # 新形式
-                self.column_mappings = config['column_mappings']
+                # 新形式：英名キーを和名キーに変換
+                column_mappings_loaded = config['column_mappings']
+                self.column_mappings = {}
+                for def_name, mapping in column_mappings_loaded.items():
+                    self.column_mappings[def_name] = {}
+                    for col_name, col_config in mapping.items():
+                        # 英名を和名に変換（マッピングにない場合は和名のままとして扱う）
+                        col_name_ja = en_to_ja_mapping.get(col_name, col_name)
+                        self.column_mappings[def_name][col_name_ja] = col_config
             elif 'column_mapping' in config:
                 # 旧形式（単一マッピング）を新形式に変換
-                self.column_mappings = {"デフォルト": config['column_mapping']}
+                old_mapping = config['column_mapping']
+                self.column_mappings = {"デフォルト": {}}
+                for col_name, col_config in old_mapping.items():
+                    col_name_ja = en_to_ja_mapping.get(col_name, col_name)
+                    self.column_mappings["デフォルト"][col_name_ja] = col_config
                 self.log("旧形式の設定を新形式に変換しました", "INFO")
             
             # メタ情報を読み込み（タイプなど）
@@ -2772,7 +3629,7 @@ class ShapefileNormalizerApp:
     def reset_config(self):
         """設定をデフォルト値にリセット（複数マッピング定義対応）"""
         if messagebox.askyesno("確認", "設定をデフォルト値にリセットしますか？"):
-            self.min_distance.set(0.01)
+            self.min_distance.set(0)
             self.source_epsg.set("6669")
             self.target_epsg.set("6677")
             
@@ -2783,7 +3640,7 @@ class ShapefileNormalizerApp:
             
             # UIをリセット
             if self.current_mapping_widgets:
-                for out_col, widgets in self.current_mapping_widgets.items():
+                for _, widgets in self.current_mapping_widgets.items():
                     widgets['type_var'].set("None")
                     # 全ての入力欄をクリア
                     widgets['assign_combo'].set('')
@@ -3007,6 +3864,9 @@ class ShapefileNormalizerApp:
             messagebox.showwarning("警告", "処理実行中です。しばらくお待ちください。")
             return
 
+        # 実行前にUI上の設定を反映（config.jsonの設定よりUIの設定を優先）
+        self.save_current_mapping_to_definition()
+
         self.clear_log()
         self.status_label.config(text="処理中...")
         self.execute_button.config(state=tk.DISABLED)
@@ -3099,7 +3959,107 @@ class ShapefileNormalizerApp:
                 messagebox.showerror("エラー", f"処理中にエラーが発生しました:\n{str(e)}")
 
             self.root.after(0, update_ui_on_error)
-    
+
+    def apply_fallback(self, new_data, out_col, fallback, current_processing_filename):
+        """
+        補完処理を適用する共通メソッド
+
+        Args:
+            new_data: 出力データの辞書
+            out_col: 出力カラム名
+            fallback: 補完設定の辞書
+            current_processing_filename: 処理中のファイル名
+        """
+        if not fallback:
+            return
+
+        try:
+            mask = new_data[out_col].isna() | (new_data[out_col] == '') | (new_data[out_col] == 'None')
+            if not mask.any():
+                return
+
+            fallback_type = fallback.get('type', '')
+
+            if fallback_type == "固定値":
+                # 新形式'value'と旧形式'fixed_value'の両方をサポート
+                fallback_value = fallback.get('value', fallback.get('fixed_value', ''))
+                # 元のカラムの型に合わせて変換を試みる
+                if pd.api.types.is_numeric_dtype(new_data[out_col]):
+                    try:
+                        fallback_value = pd.to_numeric(fallback_value)
+                    except:
+                        pass
+                # where を使用してマスクに基づいて値を置換
+                new_data[out_col] = new_data[out_col].where(~mask, fallback_value)
+
+            elif fallback_type == "カラム条件分岐":
+                fallback_col = fallback.get('column', '')
+                conditions = fallback.get('conditions', [])
+                default_value = fallback.get('default', '')
+                if fallback_col in self.gdf.columns and conditions:
+                    # 条件配列から辞書を作成
+                    mapping_dict = {}
+                    for condition in conditions:
+                        input_val = condition.get('input', '')
+                        output_val = condition.get('output', '')
+                        if input_val:
+                            mapping_dict[input_val] = output_val
+
+                    # カラムの値に応じて出力値を決定
+                    for idx in new_data[out_col].index:
+                        if mask[idx]:  # 補完が必要な行のみ
+                            source_value = str(self.gdf.loc[idx, fallback_col]) if fallback_col in self.gdf.columns else ''
+                            # マッピングから出力値を取得
+                            if source_value in mapping_dict:
+                                new_data[out_col].iloc[idx] = mapping_dict[source_value]
+                            elif default_value:
+                                # マッピングに一致しない場合はデフォルト値を使用
+                                new_data[out_col].iloc[idx] = default_value
+
+            elif fallback_type == "ファイル名分岐":
+                filename_mapping = fallback.get('filename_mapping', '')
+                default_value = fallback.get('default', '')
+
+                # ファイル名=出力値 形式をパース
+                mapping_dict = {}
+                if filename_mapping:
+                    for pair in filename_mapping.split(','):
+                        if '=' in pair:
+                            key, val = pair.split('=', 1)
+                            mapping_dict[key.strip()] = val.strip()
+
+                # 現在のファイル名を取得（実行中のファイル）
+                current_filename = current_processing_filename
+                current_filename_noext = os.path.splitext(current_filename)[0]
+
+                # ファイル名に一致する値を取得（ワイルドカード対応）
+                fallback_value = None
+                for pattern, value in mapping_dict.items():
+                    # 完全一致
+                    if current_filename == pattern or current_filename_noext == pattern:
+                        fallback_value = value
+                        break
+                    # ワイルドカードパターンマッチング
+                    if fnmatch.fnmatch(current_filename, pattern) or fnmatch.fnmatch(current_filename_noext, pattern):
+                        fallback_value = value
+                        break
+
+                # マッピングに一致しない場合はデフォルト値を使用
+                if fallback_value is None and default_value:
+                    fallback_value = default_value
+
+                if fallback_value:
+                    # 元のカラムの型に合わせて変換を試みる
+                    if pd.api.types.is_numeric_dtype(new_data[out_col]):
+                        try:
+                            fallback_value = pd.to_numeric(fallback_value)
+                        except:
+                            pass
+                    # where を使用してマスクに基づいて値を置換
+                    new_data[out_col] = new_data[out_col].where(~mask, fallback_value)
+        except Exception as e:
+            pass
+
     def process_single_file(self, input_file, file_num):
         """
         単一Shapefileの変換処理
@@ -3221,6 +4181,7 @@ class ShapefileNormalizerApp:
             self.log(f"      元のカラム: {list(self.gdf.columns)}")
             
             original_count = len(self.gdf)
+            deleted_count = 0  # 削除件数をトラッキング
             to_remove = []
             
             # ② 無効なジオメトリのチェックと修正
@@ -3279,6 +4240,7 @@ class ShapefileNormalizerApp:
             if to_remove:
                 indices_to_remove = [idx for idx, _ in to_remove]
                 self.gdf = self.gdf.drop(indices_to_remove)
+                deleted_count += len(to_remove)
                 self.log(f"      {len(to_remove)} 件の無効なレコードを削除")
             
             if fixed_count == 0 and len(to_remove) == 0:
@@ -3307,6 +4269,7 @@ class ShapefileNormalizerApp:
             if to_remove:
                 indices_to_remove = [idx for idx, _ in to_remove]
                 self.gdf = self.gdf.drop(indices_to_remove)
+                deleted_count += len(to_remove)
                 self.log(f"      {len(to_remove)} 件の短辺レコードを削除")
             else:
                 self.log("      短い辺なし")
@@ -3333,6 +4296,7 @@ class ShapefileNormalizerApp:
             if to_remove:
                 indices_to_remove = [idx for idx, _ in to_remove]
                 self.gdf = self.gdf.drop(indices_to_remove)
+                deleted_count += len(to_remove)
                 self.log(f"      {len(to_remove)} 件の不正Polygonを削除")
             else:
                 self.log("      不正なPolygonなし")
@@ -3401,45 +4365,9 @@ class ShapefileNormalizerApp:
                     if col_name and col_name in self.gdf.columns:
                         new_data[out_col] = self.gdf[col_name].copy()
                         self.log(f"      {out_col}: カラム代入 '{col_name}' → 成功", "DEBUG")
-                        
+
                         # 補完処理の適用
-                        fallback = mapping_config.get('fallback', {})
-                        if fallback:
-                            mask = new_data[out_col].isna() | (new_data[out_col] == '') | (new_data[out_col] == 'None')
-                            if mask.any():
-                                fallback_type = fallback.get('type', '')
-                                if fallback_type == "固定値":
-                                    fallback_value = fallback.get('fixed_value', '')
-                                    new_data[out_col] = new_data[out_col].fillna(fallback_value)
-                                    new_data[out_col] = new_data[out_col].replace(['', 'None'], fallback_value)
-                                elif fallback_type == "他カラム":
-                                    fallback_col = fallback.get('column', '')
-                                    if fallback_col in self.gdf.columns:
-                                        new_data[out_col][mask] = self.gdf[fallback_col][mask]
-                                elif fallback_type == "ファイル名":
-                                    filename_mapping = fallback.get('filename_mapping', '')
-                                    if filename_mapping:
-                                        # ファイル名=出力値 形式をパース
-                                        mapping_dict = {}
-                                        for pair in filename_mapping.split(','):
-                                            if '=' in pair:
-                                                key, val = pair.split('=', 1)
-                                                mapping_dict[key.strip()] = val.strip()
-                                        
-                                        # 現在のファイル名を取得（実行中のファイル）
-                                        current_filename = current_processing_filename
-                                        current_filename_noext = os.path.splitext(current_filename)[0]
-                                        
-                                        # ファイル名に一致する値を取得
-                                        fallback_value = None
-                                        if current_filename in mapping_dict:
-                                            fallback_value = mapping_dict[current_filename]
-                                        elif current_filename_noext in mapping_dict:
-                                            fallback_value = mapping_dict[current_filename_noext]
-                                        
-                                        if fallback_value:
-                                            new_data[out_col] = new_data[out_col].fillna(fallback_value)
-                                            new_data[out_col] = new_data[out_col].replace(['', 'None'], fallback_value)
+                        self.apply_fallback(new_data, out_col, mapping_config.get('fallback', {}), current_processing_filename)
                     else:
                         new_data[out_col] = None
                         if col_name:
@@ -3466,43 +4394,9 @@ class ShapefileNormalizerApp:
                             elif operator == '/':
                                 new_data[out_col] = col_data / value
                             self.log(f"      {out_col}: 四則演算 '{col_name}' {operator} {value} → 成功", "DEBUG")
-                            
+
                             # 補完処理の適用
-                            fallback = mapping_config.get('fallback', {})
-                            if fallback:
-                                mask = new_data[out_col].isna()
-                                if mask.any():
-                                    fallback_type = fallback.get('type', '')
-                                    if fallback_type == "固定値":
-                                        fallback_value = fallback.get('fixed_value', '')
-                                        new_data[out_col] = new_data[out_col].fillna(fallback_value)
-                                    elif fallback_type == "他カラム":
-                                        fallback_col = fallback.get('column', '')
-                                        if fallback_col in self.gdf.columns:
-                                            new_data[out_col][mask] = self.gdf[fallback_col][mask]
-                                    elif fallback_type == "ファイル名":
-                                        filename_mapping = fallback.get('filename_mapping', '')
-                                        if filename_mapping:
-                                            # ファイル名=出力値 形式をパース
-                                            mapping_dict = {}
-                                            for pair in filename_mapping.split(','):
-                                                if '=' in pair:
-                                                    key, val = pair.split('=', 1)
-                                                    mapping_dict[key.strip()] = val.strip()
-                                            
-                                            # 現在のファイル名を取得
-                                            current_filename = self.sample_shp_filename if self.sample_shp_filename else ''
-                                            current_filename_noext = os.path.splitext(current_filename)[0]
-                                            
-                                            # ファイル名に一致する値を取得
-                                            fallback_value = None
-                                            if current_filename in mapping_dict:
-                                                fallback_value = mapping_dict[current_filename]
-                                            elif current_filename_noext in mapping_dict:
-                                                fallback_value = mapping_dict[current_filename_noext]
-                                            
-                                            if fallback_value:
-                                                new_data[out_col] = new_data[out_col].fillna(fallback_value)
+                            self.apply_fallback(new_data, out_col, mapping_config.get('fallback', {}), current_processing_filename)
                         except Exception as e:
                             new_data[out_col] = None
                             self.log(f"      {out_col}: 四則演算エラー → None ({str(e)})", "WARNING")
@@ -3529,43 +4423,9 @@ class ShapefileNormalizerApp:
                             elif operator == '/':
                                 new_data[out_col] = col1_data / col2_data
                             self.log(f"      {out_col}: 複数カラム演算 '{col1_name}' {operator} '{col2_name}' → 成功", "DEBUG")
-                            
+
                             # 補完処理の適用
-                            fallback = mapping_config.get('fallback', {})
-                            if fallback:
-                                mask = new_data[out_col].isna()
-                                if mask.any():
-                                    fallback_type = fallback.get('type', '')
-                                    if fallback_type == "固定値":
-                                        fallback_value = fallback.get('fixed_value', '')
-                                        new_data[out_col] = new_data[out_col].fillna(fallback_value)
-                                    elif fallback_type == "他カラム":
-                                        fallback_col = fallback.get('column', '')
-                                        if fallback_col in self.gdf.columns:
-                                            new_data[out_col][mask] = self.gdf[fallback_col][mask]
-                                    elif fallback_type == "ファイル名":
-                                        filename_mapping = fallback.get('filename_mapping', '')
-                                        if filename_mapping:
-                                            # ファイル名=出力値 形式をパース
-                                            mapping_dict = {}
-                                            for pair in filename_mapping.split(','):
-                                                if '=' in pair:
-                                                    key, val = pair.split('=', 1)
-                                                    mapping_dict[key.strip()] = val.strip()
-                                            
-                                            # 現在のファイル名を取得
-                                            current_filename = self.sample_shp_filename if self.sample_shp_filename else ''
-                                            current_filename_noext = os.path.splitext(current_filename)[0]
-                                            
-                                            # ファイル名に一致する値を取得
-                                            fallback_value = None
-                                            if current_filename in mapping_dict:
-                                                fallback_value = mapping_dict[current_filename]
-                                            elif current_filename_noext in mapping_dict:
-                                                fallback_value = mapping_dict[current_filename_noext]
-                                            
-                                            if fallback_value:
-                                                new_data[out_col] = new_data[out_col].fillna(fallback_value)
+                            self.apply_fallback(new_data, out_col, mapping_config.get('fallback', {}), current_processing_filename)
                         except Exception as e:
                             new_data[out_col] = None
                             self.log(f"      {out_col}: 複数カラム演算エラー → None ({str(e)})", "WARNING")
@@ -3573,73 +4433,40 @@ class ShapefileNormalizerApp:
                         new_data[out_col] = None
                 
                 elif map_type == "複数カラム抽出":
-                    mode = mapping_config.get('mode', '').strip()
+                    # 後方互換性のため 'mode' もサポート
+                    operator = mapping_config.get('operator', mapping_config.get('mode', '')).strip().upper()
                     columns = mapping_config.get('columns', [])
-                    
+
                     # 空でないカラム名で、"None"以外のものをフィルタ
                     valid_columns = [col.strip() for col in columns if col and col.strip() and col.strip() != "None"]
-                    
+
                     # 有効なカラムが存在するか確認
                     existing_columns = [col for col in valid_columns if col in self.gdf.columns]
-                    
-                    if existing_columns and mode in ["最大値", "最小値"]:
+
+                    if existing_columns and operator in ["MAX", "MIN"]:
                         try:
                             # 数値に変換
-                            col_data_list = [pd.to_numeric(self.gdf[col], errors='coerce') 
+                            col_data_list = [pd.to_numeric(self.gdf[col], errors='coerce')
                                            for col in existing_columns]
-                            
+
                             # DataFrameに統合
                             combined_df = pd.concat(col_data_list, axis=1)
-                            
-                            if mode == "最大値":
+
+                            if operator == "MAX":
                                 new_data[out_col] = combined_df.max(axis=1)
-                            else:  # 最小値
+                            else:  # MIN
                                 new_data[out_col] = combined_df.min(axis=1)
-                            
-                            self.log(f"      {out_col}: 複数カラム抽出 {mode} {existing_columns} → 成功", "DEBUG")
-                            
+
+                            self.log(f"      {out_col}: 複数カラム抽出 {operator} {existing_columns} → 成功", "DEBUG")
+
                             # 補完処理の適用
-                            fallback = mapping_config.get('fallback', {})
-                            if fallback:
-                                mask = new_data[out_col].isna()
-                                if mask.any():
-                                    fallback_type = fallback.get('type', '')
-                                    if fallback_type == "固定値":
-                                        fallback_value = fallback.get('fixed_value', '')
-                                        new_data[out_col] = new_data[out_col].fillna(fallback_value)
-                                    elif fallback_type == "他カラム":
-                                        fallback_col = fallback.get('column', '')
-                                        if fallback_col in self.gdf.columns:
-                                            new_data[out_col][mask] = self.gdf[fallback_col][mask]
-                                    elif fallback_type == "ファイル名":
-                                        filename_mapping = fallback.get('filename_mapping', '')
-                                        if filename_mapping:
-                                            # ファイル名=出力値 形式をパース
-                                            mapping_dict = {}
-                                            for pair in filename_mapping.split(','):
-                                                if '=' in pair:
-                                                    key, val = pair.split('=', 1)
-                                                    mapping_dict[key.strip()] = val.strip()
-                                            
-                                            # 現在のファイル名を取得
-                                            current_filename = self.sample_shp_filename if self.sample_shp_filename else ''
-                                            current_filename_noext = os.path.splitext(current_filename)[0]
-                                            
-                                            # ファイル名に一致する値を取得
-                                            fallback_value = None
-                                            if current_filename in mapping_dict:
-                                                fallback_value = mapping_dict[current_filename]
-                                            elif current_filename_noext in mapping_dict:
-                                                fallback_value = mapping_dict[current_filename_noext]
-                                            
-                                            if fallback_value:
-                                                new_data[out_col] = new_data[out_col].fillna(fallback_value)
+                            self.apply_fallback(new_data, out_col, mapping_config.get('fallback', {}), current_processing_filename)
                         except Exception as e:
                             new_data[out_col] = None
                             self.log(f"      {out_col}: 複数カラム抽出エラー → None ({str(e)})", "WARNING")
                     else:
                         new_data[out_col] = None
-                        if not mode:
+                        if not operator:
                             self.log(f"      {out_col}: 抽出モード未指定 → None", "WARNING")
                         elif not existing_columns:
                             self.log(f"      {out_col}: 有効なカラムが見つかりません → None", "WARNING")
@@ -3769,6 +4596,22 @@ class ShapefileNormalizerApp:
                     new_data_english[jp_col_name] = value
 
             self.gdf = gpd.GeoDataFrame(new_data_english, geometry='geometry', crs=self.gdf.crs)
+
+            # 整数型に変換可能なカラムを変換（小数点表示を避ける）
+            for col in self.gdf.columns:
+                if col != 'geometry' and pd.api.types.is_float_dtype(self.gdf[col]):
+                    # NaNでない値について、すべて整数と等しいかチェック
+                    non_nan_mask = ~self.gdf[col].isna()
+                    if non_nan_mask.any():
+                        non_nan_values = self.gdf[col][non_nan_mask]
+                        # すべての値が整数と等しい（小数部分が0）かチェック
+                        if (non_nan_values == non_nan_values.astype(int)).all():
+                            # NaNがある場合はInt64（nullable integer）、ない場合はint
+                            if self.gdf[col].isna().any():
+                                self.gdf[col] = self.gdf[col].astype('Int64')
+                            else:
+                                self.gdf[col] = self.gdf[col].astype(int)
+
             self.log(f"      カラムマッピング完了: {len(output_columns)} カラム")
             
             # ⑧ 出力
@@ -3799,7 +4642,7 @@ class ShapefileNormalizerApp:
                 monitor_thread.join(timeout=1)
 
             self.log(f"      出力完了: {output_file}")
-            self.log(f"      入力レコード: {original_count}, 出力レコード: {output_record_count}, 削除: {original_count - output_record_count}")
+            self.log(f"      入力レコード: {original_count}, 出力レコード: {output_record_count}, 削除: {deleted_count}")
             
             return True
             

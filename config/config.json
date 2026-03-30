@@ -1,5 +1,5 @@
 {
-  "min_distance": 0.01,
+  "min_distance": 0,
   "source_epsg": "6669",
   "target_epsg": "6677",
   "source_encoding": "UTF-8",
