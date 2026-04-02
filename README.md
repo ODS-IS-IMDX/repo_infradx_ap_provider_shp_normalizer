@@ -23,6 +23,10 @@
     │   ├── ShapefileNormalizerTool.spec   // PyInstallerスペックファイル
     │   ├── build_exe.bat                   // EXEビルドスクリプト
     │   └── pyi_rth_gdal.py                 // PyInstaller Runtime Hook（GDAL/pyogrio用）
+    ├── docs                       　　  // マニュアル
+    │   ├── 01_【データ整備】全体ガイド.pdf   // データ整備全体マニュアル
+    │   ├── 02_【データ整備】投入値申請書_Config出力ツールマニュアル.pdf   // 投入値申請書利用マニュアル
+    │   └── 03_【データ整備】変換ツールマニュアル.pdf     // 変換ツール利用
     ├── builds                              // ビルド成果物格納ディレクトリ
     ├── requirements.txt                    // 依存ライブラリ定義
     ├── ShapefileNormalizerTool.exe         // 実行ファイル（配布用）
