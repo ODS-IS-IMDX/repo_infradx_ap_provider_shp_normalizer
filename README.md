@@ -15,11 +15,11 @@
 
 ```
 └── shapefile-normalizer-tool
-    ├── src                             // ソースコード
-    │   └── shapefile_normalizer_gui.py // メインアプリケーション
-    ├── config                          // 設定ファイル格納ディレクトリ
-    │   └── config.json                 // 設定ファイル
-    ├── scripts                         // ビルドスクリプト
+    ├── src                            　 // ソースコード
+    │   └── shapefile_normalizer_gui.py　　 // メインアプリケーション
+    ├── config                       　   // 設定ファイル格納ディレクトリ
+    │   └── config.json             　    // 設定ファイル
+    ├── scripts                       　　  // ビルドスクリプト
     │   ├── ShapefileNormalizerTool.spec   // PyInstallerスペックファイル
     │   ├── build_exe.bat                   // EXEビルドスクリプト
     │   └── pyi_rth_gdal.py                 // PyInstaller Runtime Hook（GDAL/pyogrio用）
@@ -27,8 +27,8 @@
     ├── requirements.txt                    // 依存ライブラリ定義
     ├── ShapefileNormalizerTool.exe         // 実行ファイル（配布用）
     ├── 投入値申請書_Config出力ツール.xlsx     // 初期設定ツール用投入申請書
-    ├── 申請書マクロコード.bas     // 初期設定ツールマクロ
-    └── README.md                       // 本ファイル
+    ├── 申請書マクロコード.bas   　　　　　　  // 初期設定ツールマクロ
+    └── README.md                 　　      // 本ファイル
 ```
 
 # 前提条件
@@ -39,17 +39,15 @@
    | Python         | -                      | 3.14.3     |
 
 # リポジトリ利用方法
-➀初期設定ツールの利用方法
-[マニュアル]()をご参照ください。
+➀初期設定ツールの利用方法は[マニュアル](https://github.com/ODS-IS-IMDX/repo_infradx_ap_provider_shp_normalizer/tree/main/docs)をご参照ください。
 
 ➁データ変換ツールの利用方法
 必要なソフトウェアやサービスの詳細は[前提条件](#前提条件)をご参照ください。
 
-## 方法1: 配布済みEXE/MSIを使用する場合
+## 方法1: 配布済みEXEを使用する場合
 
 1. 配布済みの実行ファイルを使用します。
    - `ShapefileNormalizerTool.exe`: ダブルクリックで起動（Pythonインストール不要）
-   - `ShapefileNormalizerTool-1.0.0-win64.msi`: インストーラーを実行してインストール
 
 ## 方法2: Pythonスクリプトを直接実行する場合（開発・テスト用）
 
@@ -66,16 +64,13 @@
    python shapefile_normalizer_gui.py
    ```
 
-## 方法3: EXE/MSIをビルドする場合
+## 方法3: EXEをビルドする場合
 
 1. ビルドスクリプトを実行します。
    | ビルドスクリプト | 概要 |
    | ------------------------ | -------------------------------------------------------------------------------- |
    | scripts\build_exe.bat | PyInstallerで単一EXEファイルをビルド（依存ライブラリは自動インストールされます） |
-   | scripts\build_cx_msi.bat | cx_FreezeでMSIインストーラーをビルド（依存ライブラリは自動インストールされます） |
 2. ビルド成果物は `builds\dist\` ディレクトリに出力されます。
-
-   **注意**: MSIビルド時にconfig.jsonを含めたい場合は、ビルド前に `config\config.json` に設定を記述してください。ビルド時に自動的にMSIに内包されます。
 
 ## アプリケーションの使用方法
 
