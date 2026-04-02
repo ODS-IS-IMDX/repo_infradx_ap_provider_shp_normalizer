@@ -20,12 +20,14 @@
     ├── config                          // 設定ファイル格納ディレクトリ
     │   └── config.json                 // 設定ファイル
     ├── scripts                         // ビルドスクリプト
-    │   ├── ShapefileNormalizerTool.spec // PyInstallerスペックファイル
-    │   ├── build_exe.bat               // EXEビルドスクリプト
-    │   └── pyi_rth_gdal.py             // PyInstaller Runtime Hook（GDAL/pyogrio用）
-    ├── builds                          // ビルド成果物格納ディレクトリ
-    ├── requirements.txt                // 依存ライブラリ定義
-    ├── ShapefileNormalizerTool.exe     // 実行ファイル（配布用）
+    │   ├── ShapefileNormalizerTool.spec   // PyInstallerスペックファイル
+    │   ├── build_exe.bat                   // EXEビルドスクリプト
+    │   └── pyi_rth_gdal.py                 // PyInstaller Runtime Hook（GDAL/pyogrio用）
+    ├── builds                              // ビルド成果物格納ディレクトリ
+    ├── requirements.txt                    // 依存ライブラリ定義
+    ├── ShapefileNormalizerTool.exe         // 実行ファイル（配布用）
+    ├── 投入値申請書_Config出力ツール.xlsx     // 初期設定ツール用投入申請書
+    ├── 申請書マクロコード.bas     // 初期設定ツールマクロ
     └── README.md                       // 本ファイル
 ```
 
