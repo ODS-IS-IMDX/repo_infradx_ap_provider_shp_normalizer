@@ -23,6 +23,7 @@
     │   ├── ShapefileNormalizerTool.spec   // PyInstallerスペックファイル
     │   ├── build_exe.bat                   // EXEビルドスクリプト
     │   └── pyi_rth_gdal.py                 // PyInstaller Runtime Hook（GDAL/pyogrio用）
+　  │   └──setup_cx_only.py
     ├── docs                       　　  // マニュアル
     │   ├── 01_【データ整備】全体ガイド.pdf   // データ整備全体マニュアル
     │   ├── 02_【データ整備】投入値申請書_Config出力ツールマニュアル.pdf   // 投入値申請書利用マニュアル
@@ -32,7 +33,9 @@
     ├── ShapefileNormalizerTool.exe         // 実行ファイル（配布用）
     ├── 設定ファイル出力ツール.xlsx   　　  // 設定ファイル出力ツール
     ├── 設定ファイル出力ツールマクロコード.bas     // 設定ファイル出力ツールマクロ
-    └── README.md                 　　      // 本ファイル
+    ├── README.md                 　　      // 本ファイル
+    ├── .gitignore
+ 　 └── LICENSE.txt              //ライセンスファイル
 ```
 
 # 前提条件
