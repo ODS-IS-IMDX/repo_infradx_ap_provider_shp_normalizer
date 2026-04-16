@@ -35,7 +35,7 @@
     ├── 設定ファイル出力ツールマクロコード.bas     // 設定ファイル出力ツールマクロ
     ├── README.md                 　　      // 本ファイル
     ├── .gitignore　　　　　　　　//Github管理対象外フォルダ
-    ├── config　　　　　　　　//設定ファイル
+    ├── config.json　　　　　　　　//設定ファイル
  　 └── LICENSE.txt              //ライセンスファイル
 ```
 
